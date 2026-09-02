@@ -1,0 +1,13 @@
+# IDE and Editor Configurations
+.directory
+.idea
+.vscode/*
+
+# System Files
+.DS_Store
+
+# Logs and Debugging Files
+npm-debug.log
+
+# Node Modules
+/node_modules/
