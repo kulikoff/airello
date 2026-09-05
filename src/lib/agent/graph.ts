@@ -1,28 +1,154 @@
 import { Annotation, END, START, StateGraph } from '@langchain/langgraph';
-import { generateObject, generateText, isStepCount } from 'ai';
+import {
+  generateObject,
+  generateText,
+  isStepCount,
+  NoObjectGeneratedError,
+} from 'ai';
 import { z } from 'zod';
 
 import { taskManagerTools } from './tools';
 import { MAX_ITERATIONS, MODEL_ID, type Task } from './types';
 
 // Structured DeepSeek audit report — forces precise LangGraph routing inputs
+// Preprocessors tolerate common LLM quirks (string errors, missing reasoning, etc.)
 export const AuditReportSchema = z.object({
-  isValid: z
-    .boolean()
-    .describe(
-      'Set to true ONLY if the tasks comprehensively and realistically achieve the business goal.',
-    ),
-  errors: z
-    .array(z.string())
-    .describe(
-      'List of clear, actionable errors or gaps if isValid is false. Empty array if true.',
-    ),
-  reasoning: z
-    .string()
-    .describe(
-      'A brief internal justification of why the plan is valid or invalid.',
-    ),
+  isValid: z.preprocess(value => {
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'string') {
+      const normalized = value.trim().toLowerCase();
+      if (['true', 'yes', 'valid', '1'].includes(normalized)) return true;
+      if (['false', 'no', 'invalid', '0'].includes(normalized)) return false;
+    }
+    return value;
+  }, z.boolean()).describe(
+    'Set to true ONLY if the tasks comprehensively and realistically achieve the business goal.',
+  ),
+  errors: z.preprocess(value => {
+    if (Array.isArray(value)) {
+      return value.map(item => String(item));
+    }
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      return trimmed ? [trimmed] : [];
+    }
+    if (value == null) return [];
+    return [String(value)];
+  }, z.array(z.string())).describe(
+    'List of clear, actionable errors or gaps if isValid is false. Empty array if true.',
+  ),
+  reasoning: z.preprocess(
+    value => (value == null ? '' : String(value)),
+    z.string(),
+  ).describe(
+    'A brief internal justification of why the plan is valid or invalid.',
+  ),
 });
+
+export type AuditReport = z.infer<typeof AuditReportSchema>;
+
+function extractJsonObject(text: string): string | null {
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced?.[1]) return fenced[1].trim();
+
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start >= 0 && end > start) {
+    return text.slice(start, end + 1);
+  }
+
+  return null;
+}
+
+async function repairAuditJson({
+  text,
+}: {
+  text: string;
+  error: unknown;
+}): Promise<string | null> {
+  const extracted = extractJsonObject(text);
+  if (!extracted) return null;
+
+  // Normalize common alternate keys some models emit
+  try {
+    const parsed = JSON.parse(extracted) as Record<string, unknown>;
+    if (parsed.errors == null && parsed.error != null) {
+      parsed.errors = parsed.error;
+    }
+    if (parsed.errors == null && parsed.validationErrors != null) {
+      parsed.errors = parsed.validationErrors;
+    }
+    if (parsed.reasoning == null && parsed.reason != null) {
+      parsed.reasoning = parsed.reason;
+    }
+    if (parsed.reasoning == null && parsed.feedback != null) {
+      parsed.reasoning = parsed.feedback;
+    }
+    return JSON.stringify(parsed);
+  } catch {
+    return extracted;
+  }
+}
+
+function parseAuditFromText(text: string | undefined): AuditReport | null {
+  if (!text) return null;
+  const json = extractJsonObject(text) ?? text;
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    const result = AuditReportSchema.safeParse(parsed);
+    return result.success ? result.data : null;
+  } catch {
+    return null;
+  }
+}
+
+async function generateAuditReport(prompt: string): Promise<AuditReport> {
+  try {
+    const response = await generateObject({
+      model: MODEL_ID,
+      schema: AuditReportSchema,
+      prompt,
+      temperature: 0,
+      repairText: repairAuditJson,
+    });
+    return response.object;
+  } catch (error) {
+    if (NoObjectGeneratedError.isInstance(error)) {
+      console.warn('[VALIDATOR] generateObject schema mismatch, recovering…', {
+        cause: error.cause,
+        textPreview: error.text?.slice(0, 400),
+        finishReason: error.finishReason,
+      });
+
+      const recovered = parseAuditFromText(error.text);
+      if (recovered) return recovered;
+    } else {
+      console.warn('[VALIDATOR] generateObject failed, recovering…', error);
+    }
+
+    // Last resort: ask the model for raw JSON and parse locally
+    const fallback = await generateText({
+      model: MODEL_ID,
+      temperature: 0,
+      prompt: `${prompt}
+
+Respond with ONLY a raw JSON object (no markdown) shaped exactly like:
+{"isValid":boolean,"errors":string[],"reasoning":string}`,
+    });
+
+    const recovered = parseAuditFromText(fallback.text);
+    if (recovered) return recovered;
+
+    return {
+      isValid: false,
+      errors: [
+        'Validator could not produce a structured audit report. Rebuild the plan with clearer, more complete engineering tasks.',
+      ],
+      reasoning:
+        'Fallback rejection after structured-output failure from the model.',
+    };
+  }
+}
 
 // Shared memory (State) for the agent graph
 export const AgentState = Annotation.Root({
@@ -168,15 +294,11 @@ CRITERIA FOR ACCEPTANCE:
 2. Clarity: Are task titles explicit? (Reject vague tasks like "do coding" or "fix stuff").
 3. Distribution: Are roles/assignees logical for a technical stack?
 
-Analyze deeply. If the plan fails any criteria, mark isValid as false and list explicit, actionable changes the planner must perform.`;
+Analyze deeply. If the plan fails any criteria, mark isValid as false and list explicit, actionable changes the planner must perform.
 
-    const response = await generateObject({
-      model: MODEL_ID,
-      schema: AuditReportSchema,
-      prompt: systemPrompt,
-    });
+Return ONLY valid JSON with keys: isValid (boolean), errors (string array), reasoning (string).`;
 
-    const audit = response.object;
+    const audit = await generateAuditReport(systemPrompt);
 
     console.log(
       `[VALIDATOR AUDIT] Valid: ${audit.isValid} | Errors Found: ${audit.errors.length}`,
@@ -207,3 +329,4 @@ Analyze deeply. If the plan fails any criteria, mark isValid as false and list e
 
 /** Default compiled graph (for Server Action / stream). */
 export const workflow = createAgentGraph();
+export const compiledWorkflow = workflow;

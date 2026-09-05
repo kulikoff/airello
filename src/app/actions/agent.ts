@@ -3,7 +3,18 @@
 import { createStreamableValue } from '@ai-sdk/rsc';
 
 import { createAgentGraph } from '@/lib/agent/graph';
-import type { AgentStreamUpdate, Task } from '@/lib/agent/types';
+import type { Task } from '@/lib/agent/types';
+
+// Exact chunk signature sent across the wire to the dashboard
+export type StreamChunk = {
+  activeNode: 'planner' | 'validator' | 'end';
+  tasks: Task[];
+  validationErrors: string[];
+  loopCount: number;
+  status: 'thinking' | 'verifying' | 'completed' | 'failed';
+  isValid?: boolean;
+  reasoning?: string;
+};
 
 type NodeOutput = {
   tasks?: Task[];
@@ -13,120 +24,136 @@ type NodeOutput = {
   auditReasoning?: string;
 };
 
-function toStreamUpdate(
-  nodeName: string,
-  nodeOutput: NodeOutput,
-): AgentStreamUpdate {
-  return {
-    status: 'running',
-    node: nodeName,
-    tasks: nodeOutput.tasks ?? null,
-    isValid: nodeOutput.isValid ?? null,
-    validationErrors: nodeOutput.validationErrors ?? null,
-    loopCount: nodeOutput.loopCount ?? null,
-    reasoning: nodeOutput.auditReasoning ?? null,
-  };
-}
-
-export async function startAgentWorkflow(businessGoal: string) {
-  const startedAt = Date.now();
-  const stream = createStreamableValue<AgentStreamUpdate>();
+export async function runAgenticWorkflow(businessGoal: string) {
+  // 1. Initialize Vercel AI SDK real-time streaming handle
+  const stream = createStreamableValue<StreamChunk>();
   const goal = businessGoal.trim();
-
-  console.log('[action] startAgentWorkflow', {
-    goalPreview: goal.slice(0, 200),
-    elapsedMs: 0,
-  });
+  const startedAt = Date.now();
 
   if (!goal) {
     stream.error(new Error('Empty business goal'));
     return { output: stream.value };
   }
 
-  // Run async so we can return stream.value to the client immediately
+  // 2. Fire-and-forget so the server immediately returns the stream pointer
   (async () => {
     try {
-      const workflow = createAgentGraph({ startedAt });
-
-      stream.update({
-        status: 'running',
-        node: 'start',
-        tasks: null,
-        isValid: null,
-        validationErrors: null,
-        loopCount: 0,
-        message: 'Agent graph started',
-      });
-
-      const eventStream = await workflow.stream(
-        {
-          businessGoal: goal,
-          tasks: [],
-          isValid: false,
-          validationErrors: [],
-          loopCount: 0,
-          auditReasoning: '',
-        },
-        {
-          streamMode: 'updates',
-        },
+      console.log(
+        `[SERVER ACTION] Initializing Agent Loop for Goal: "${goal}"`,
       );
 
-      let latestTasks: Task[] | null = null;
-      let latestLoopCount: number | null = 0;
-      let latestIsValid: boolean | null = null;
-      let latestErrors: string[] | null = null;
-      let latestReasoning: string | null = null;
+      // Fresh graph instance so logging gets accurate startedAt timing
+      const compiledWorkflow = createAgentGraph({ startedAt });
 
-      for await (const event of eventStream) {
-        const nodeName = Object.keys(event)[0];
+      const initialState = {
+        businessGoal: goal,
+        tasks: [] as Task[],
+        validationErrors: [] as string[],
+        loopCount: 0,
+        isValid: false,
+        auditReasoning: '',
+      };
+
+      // Accumulated snapshot — LangGraph "updates" mode only returns per-node deltas
+      let snapshot: {
+        tasks: Task[];
+        validationErrors: string[];
+        loopCount: number;
+        isValid: boolean;
+        reasoning: string;
+      } = {
+        tasks: [],
+        validationErrors: [],
+        loopCount: 0,
+        isValid: false,
+        reasoning: '',
+      };
+
+      // 3. Consume cyclic execution via event streaming
+      const graphStream = await compiledWorkflow.stream(initialState, {
+        streamMode: 'updates',
+      });
+
+      for await (const chunk of graphStream) {
+        const nodeName = Object.keys(chunk)[0];
         if (!nodeName) continue;
 
-        const nodeOutput = (event as Record<string, NodeOutput>)[nodeName] ?? {};
-        const update = toStreamUpdate(nodeName, nodeOutput);
+        const nodeState =
+          (chunk as Record<string, NodeOutput>)[nodeName] ?? {};
 
-        if (update.tasks) latestTasks = update.tasks;
-        if (update.loopCount != null) latestLoopCount = update.loopCount;
-        if (update.isValid != null) latestIsValid = update.isValid;
-        if (update.validationErrors) latestErrors = update.validationErrors;
-        if (update.reasoning) latestReasoning = update.reasoning;
+        if (nodeState.tasks) snapshot.tasks = nodeState.tasks;
+        if (nodeState.loopCount != null) snapshot.loopCount = nodeState.loopCount;
+        if (nodeState.isValid != null) snapshot.isValid = nodeState.isValid;
+        if (nodeState.validationErrors) {
+          snapshot.validationErrors = nodeState.validationErrors;
+        }
+        if (nodeState.auditReasoning) {
+          snapshot.reasoning = nodeState.auditReasoning;
+        }
 
-        console.log('[action] graph node update', {
-          node: nodeName,
-          loopCount: update.loopCount,
-          isValid: update.isValid,
-          errorCount: update.validationErrors?.length ?? null,
-          taskCount: update.tasks?.length ?? null,
+        let activeNode: StreamChunk['activeNode'] = 'planner';
+        let status: StreamChunk['status'] = 'thinking';
+
+        if (nodeName === 'PlannerNode' || nodeName === 'planner') {
+          activeNode = 'planner';
+          status = 'thinking';
+        } else if (nodeName === 'ValidatorNode' || nodeName === 'validator') {
+          activeNode = 'validator';
+          status = 'verifying';
+        }
+
+        console.log('[SERVER ACTION] stream delta', {
+          activeNode,
+          status,
+          loopCount: snapshot.loopCount,
+          taskCount: snapshot.tasks.length,
+          errorCount: snapshot.validationErrors.length,
+          isValid: snapshot.isValid,
           elapsedMs: Date.now() - startedAt,
         });
 
-        stream.update(update);
+        // 4. Push live delta to the client dashboard
+        stream.update({
+          activeNode,
+          tasks: snapshot.tasks,
+          validationErrors: snapshot.validationErrors,
+          loopCount: snapshot.loopCount,
+          status,
+          isValid: snapshot.isValid,
+          reasoning: snapshot.reasoning || undefined,
+        });
       }
 
-      console.log('[action] graph completed', {
-        loopCount: latestLoopCount,
-        taskCount: latestTasks?.length ?? 0,
-        isValid: latestIsValid,
+      // 5. Broadcast terminating payload (accumulated snapshot — no checkpointer needed)
+      const finalStatus: StreamChunk['status'] = snapshot.isValid
+        ? 'completed'
+        : 'failed';
+
+      console.log('[SERVER ACTION] graph finished', {
+        status: finalStatus,
+        loopCount: snapshot.loopCount,
+        taskCount: snapshot.tasks.length,
         elapsedMs: Date.now() - startedAt,
       });
 
       stream.done({
-        status: 'completed',
-        node: 'end',
-        tasks: latestTasks,
-        isValid: latestIsValid,
-        validationErrors: latestIsValid ? null : latestErrors,
-        loopCount: latestLoopCount,
-        reasoning: latestReasoning,
-        message: latestIsValid
-          ? 'Graph completed successfully — plan verified'
-          : 'Graph stopped (max loops or unresolved validation errors)',
+        activeNode: 'end',
+        tasks: snapshot.tasks,
+        validationErrors: snapshot.validationErrors,
+        loopCount: snapshot.loopCount,
+        status: finalStatus,
+        isValid: snapshot.isValid,
+        reasoning: snapshot.reasoning || undefined,
       });
     } catch (error) {
-      console.error('[action] Error in graph Server Action:', error);
+      console.error('[SERVER ACTION ERROR]:', error);
       stream.error(error);
     }
   })();
 
+  // Pure reference interface for client hooks
   return { output: stream.value };
 }
+
+/** @deprecated Prefer runAgenticWorkflow */
+export const startAgentWorkflow = runAgenticWorkflow;

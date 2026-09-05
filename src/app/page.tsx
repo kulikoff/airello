@@ -3,187 +3,144 @@
 import { readStreamableValue } from '@ai-sdk/rsc';
 import { useState } from 'react';
 
-import { startAgentWorkflow } from './actions/agent';
-import type { AgentStreamUpdate, Task } from '@/lib/agent/types';
+import {
+  runAgenticWorkflow,
+  type StreamChunk,
+} from '@/app/actions/agent';
+import { KanbanBoard } from '@/components/KanbanBoard';
 
-type LogStep = AgentStreamUpdate & {
-  node: string;
-};
-
-export default function AgentUiTest() {
-  const [input, setInput] = useState(
-    'Build an MVP e-commerce store on Next.js',
-  );
+export default function AgentDashboard() {
+  const [goal, setGoal] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [logs, setLogs] = useState<LogStep[]>([]);
+  const [currentUpdate, setCurrentUpdate] = useState<StreamChunk | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!input.trim() || isLoading) return;
+    if (!goal.trim() || isLoading) return;
 
     setIsLoading(true);
-    setLogs([]);
+    setCurrentUpdate(null);
     setError(null);
 
     try {
-      const { output } = await startAgentWorkflow(input);
+      // 1. Trigger our Server Action
+      const { output } = await runAgenticWorkflow(goal);
 
-      for await (const delta of readStreamableValue(output)) {
-        if (delta?.node) {
-          setLogs(prev => [...prev, delta as LogStep]);
+      // 2. Consume the streamable values line by line
+      for await (const chunk of readStreamableValue(output)) {
+        if (chunk) {
+          setCurrentUpdate(chunk);
         }
       }
     } catch (err) {
-      console.error('Error reading stream:', err);
-      setError(err instanceof Error ? err.message : 'Unknown error');
+      console.error('Streaming failed:', err);
+      setError(err instanceof Error ? err.message : 'Streaming failed');
     } finally {
       setIsLoading(false);
     }
   };
 
+  const pulseClass =
+    currentUpdate?.status === 'thinking'
+      ? 'bg-amber-400'
+      : currentUpdate?.status === 'verifying'
+        ? 'bg-purple-500'
+        : currentUpdate?.status === 'failed'
+          ? 'bg-rose-500'
+          : 'bg-emerald-400';
+
   return (
-    <div className="max-w-4xl mx-auto p-8 font-sans text-slate-800">
-      <h1 className="text-2xl font-bold mb-6 text-slate-800">
-        Agent Graph Testing (UI)
-      </h1>
-
-      <form onSubmit={handleSubmit} className="mb-8 flex gap-4">
-        <input
-          type="text"
-          value={input}
-          onChange={e => setInput(e.target.value)}
-          disabled={isLoading}
-          className="flex-1 px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-700 bg-white"
-          placeholder="Enter a business goal..."
-        />
-        <button
-          type="submit"
-          disabled={isLoading || !input.trim()}
-          className="px-6 py-2 bg-blue-600 text-white font-medium rounded-lg hover:bg-blue-700 disabled:bg-blue-300 transition"
-        >
-          {isLoading ? 'Agent is thinking...' : 'Run AI'}
-        </button>
-      </form>
-
-      {error && (
-        <div className="mb-4 p-3 rounded-lg border border-rose-200 bg-rose-50 text-sm text-rose-700">
-          {error}
-        </div>
-      )}
-
-      <div className="space-y-4">
-        {isLoading && logs.length === 0 && (
-          <p className="text-center text-sm text-slate-400 py-8 animate-pulse">
-            Graph is starting, waiting for the first node…
+    <div className="min-h-screen bg-slate-900 text-slate-100 p-8">
+      <div className="max-w-7xl mx-auto space-y-8">
+        {/* Header */}
+        <header className="border-b border-slate-800 pb-4">
+          <h1 className="text-3xl font-black bg-gradient-to-r from-cyan-400 to-indigo-500 bg-clip-text text-transparent">
+            Autonomous AI Project Manager
+          </h1>
+          <p className="text-slate-400 text-sm mt-1">
+            Sprint 2: Real-time Agentic Loop Live Stream
           </p>
+        </header>
+
+        {/* Input Bar */}
+        <form
+          onSubmit={handleSubmit}
+          className="flex gap-4 bg-slate-800 p-4 rounded-xl border border-slate-700"
+        >
+          <input
+            type="text"
+            value={goal}
+            onChange={e => setGoal(e.target.value)}
+            disabled={isLoading}
+            placeholder="e.g., Build a microservices-based SaaS e-commerce site with high load protection..."
+            className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-slate-200 placeholder-slate-500 focus:outline-none focus:border-cyan-500 disabled:opacity-50"
+          />
+          <button
+            type="submit"
+            disabled={isLoading || !goal.trim()}
+            className="bg-gradient-to-r from-cyan-500 to-indigo-600 hover:from-cyan-600 hover:to-indigo-700 text-white font-semibold px-6 py-3 rounded-lg shadow-lg disabled:opacity-50 transition-all duration-200"
+          >
+            {isLoading ? 'Processing Loop...' : 'Generate Roadmap'}
+          </button>
+        </form>
+
+        {error && (
+          <div className="bg-red-950/50 border border-red-900 text-red-300 px-4 py-3 rounded-xl text-sm">
+            {error}
+          </div>
         )}
 
-        {logs.map((log, index) => (
-          <div
-            key={`${log.node}-${index}`}
-            className="p-4 border rounded-xl bg-slate-50 border-slate-200 shadow-sm"
-          >
-            <div className="flex items-center gap-2 mb-2 flex-wrap">
-              <span className="px-2 py-1 text-xs font-bold uppercase tracking-wider rounded bg-indigo-100 text-indigo-800">
-                Node: {log.node}
-              </span>
-              <span className="text-xs text-slate-400">Step #{index + 1}</span>
-              {log.loopCount != null && (
-                <span className="text-xs text-slate-400">
-                  Iteration: {log.loopCount}
-                </span>
-              )}
-              {log.status === 'completed' && (
-                <span className="text-xs px-2 py-0.5 font-semibold bg-emerald-100 text-emerald-800 rounded">
-                  completed
-                </span>
-              )}
-            </div>
-
-            {log.message && (
-              <p className="text-sm text-slate-600 mb-2">{log.message}</p>
-            )}
-
-            {log.node === 'planner' && log.tasks && log.tasks.length > 0 && (
+        {/* Status Tracker Sub-component */}
+        {currentUpdate && (
+          <div className="bg-slate-950 border border-slate-800 p-4 rounded-xl flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex items-center gap-4">
+              <span
+                className={`h-3 w-3 rounded-full ${isLoading ? 'animate-pulse' : ''} ${pulseClass}`}
+              />
               <div>
-                <p className="text-sm font-semibold text-slate-700 mb-2">
-                  Planner generated {log.tasks.length} tasks:
-                </p>
-                <ul className="list-disc pl-5 space-y-1 text-sm text-slate-600">
-                  {log.tasks.map((t: Task, taskIndex) => (
-                    <li key={`${t.id ?? t.title}-${taskIndex}`}>
-                      <strong>{t.title}</strong> — {t.assignee}{' '}
-                      <span className="text-slate-400">
-                        [{t.priority}] ({t.status})
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-
-            {log.node === 'validator' && (
-              <div className="mt-2">
-                <div className="flex items-center gap-2">
-                  <span className="text-sm font-medium text-slate-700">
-                    Validation result:
+                <p className="text-sm font-medium capitalize">
+                  Current Status:{' '}
+                  <span className="font-bold text-cyan-400">
+                    {currentUpdate.status}
                   </span>
-                  {log.isValid ? (
-                    <span className="text-xs px-2 py-0.5 font-semibold bg-emerald-100 text-emerald-800 rounded">
-                      Plan approved
-                    </span>
-                  ) : (
-                    <span className="text-xs px-2 py-0.5 font-semibold bg-rose-100 text-rose-800 rounded">
-                      Rejected for revision
-                    </span>
-                  )}
-                </div>
-                {log.reasoning && (
-                  <p className="mt-2 text-xs text-slate-500 italic">
-                    Reasoning: {log.reasoning}
+                </p>
+                <p className="text-xs text-slate-500">
+                  Active Node: {currentUpdate.activeNode.toUpperCase()} | Loop
+                  Turn: {currentUpdate.loopCount}/3
+                </p>
+                {currentUpdate.reasoning && (
+                  <p className="mt-1 text-xs text-slate-400 italic max-w-2xl">
+                    {currentUpdate.reasoning}
                   </p>
                 )}
-                {!log.isValid &&
-                  log.validationErrors &&
-                  log.validationErrors.length > 0 && (
-                    <div className="mt-2 bg-rose-50 border border-rose-100 p-2 rounded text-xs text-rose-700">
-                      <strong>Validator errors:</strong>
-                      <ul className="list-disc pl-4 mt-1">
-                        {log.validationErrors.map((err, i) => (
-                          <li key={`${i}-${err.slice(0, 24)}`}>{err}</li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
               </div>
-            )}
+            </div>
 
-            {log.node === 'end' && log.tasks && log.tasks.length > 0 && (
-              <div className="mt-2">
-                <p className="text-sm font-semibold text-slate-700 mb-2">
-                  Final plan ({log.tasks.length}):
-                </p>
-                <ul className="list-disc pl-5 space-y-1 text-sm text-slate-600">
-                  {log.tasks.map((t: Task, taskIndex) => (
-                    <li key={`final-${t.id ?? t.title}-${taskIndex}`}>
-                      <strong>{t.title}</strong> — {t.assignee}{' '}
-                      <span className="text-slate-400">
-                        [{t.priority}] ({t.status})
-                      </span>
-                    </li>
+            {/* Validation Error Feedback Banner */}
+            {currentUpdate.validationErrors.length > 0 && (
+              <div className="bg-red-950/50 border border-red-900 text-red-400 px-4 py-2 rounded-lg text-xs max-w-md">
+                <span className="font-bold block mb-1">
+                  Validator Corrections Triggered:
+                </span>
+                <ul className="list-disc pl-4 space-y-0.5">
+                  {currentUpdate.validationErrors.map((err, i) => (
+                    <li key={`${i}-${err.slice(0, 24)}`}>{err}</li>
                   ))}
                 </ul>
               </div>
             )}
           </div>
-        ))}
+        )}
 
-        {logs.length === 0 && !isLoading && (
-          <p className="text-center text-sm text-slate-400 py-12 border-2 border-dashed border-slate-200 rounded-xl">
-            Enter a goal and click &quot;Run AI&quot; to watch the cyclic graph
-            work
-          </p>
+        {/* Dynamic Kanban Canvas rendering the stream state array directly */}
+        {currentUpdate && <KanbanBoard tasks={currentUpdate.tasks} />}
+
+        {!currentUpdate && !isLoading && (
+          <div className="rounded-xl border border-dashed border-slate-700 bg-slate-950/40 px-6 py-16 text-center text-sm text-slate-500">
+            Enter a business goal and click &quot;Generate Roadmap&quot; to
+            watch Planner → Validator stream into the Kanban board.
+          </div>
         )}
       </div>
     </div>
