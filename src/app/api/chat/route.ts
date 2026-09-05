@@ -26,15 +26,15 @@ export async function POST(req: Request) {
 
   try {
     const { messages }: { messages: UIMessage[] } = await req.json();
-    const userPrompt = lastUserText(messages);
+    const businessGoal = lastUserText(messages);
 
     console.log('[chat] incoming request', {
       messageCount: messages.length,
-      lastUserText: userPrompt.slice(0, 200),
+      businessGoal: businessGoal.slice(0, 200),
       roles: messages.map(m => m.role),
     });
 
-    if (!userPrompt) {
+    if (!businessGoal) {
       return new Response(JSON.stringify({ error: 'Empty user request' }), {
         status: 400,
         headers: { 'Content-Type': 'application/json' },
@@ -49,16 +49,19 @@ export async function POST(req: Request) {
 
     const app = createAgentGraph({ startedAt });
     const finalState = await app.invoke({
-      userPrompt,
-      iterations: 0,
-      validationFeedback: '',
+      businessGoal,
       tasks: [],
+      isValid: false,
+      validationErrors: [],
+      loopCount: 0,
+      auditReasoning: '',
     });
 
     console.log('[agent] graph invoke finish', {
-      iterations: finalState.iterations,
+      loopCount: finalState.loopCount,
       taskCount: finalState.tasks?.length ?? 0,
-      hadUnresolvedFeedback: Boolean(finalState.validationFeedback),
+      isValid: finalState.isValid,
+      validationErrors: finalState.validationErrors,
       tasks: finalState.tasks,
       elapsedMs: Date.now() - startedAt,
     });
@@ -71,9 +74,9 @@ export async function POST(req: Request) {
       model: MODEL_ID,
       system:
         'You are an AI project manager. Present the final, team-approved task plan to the user in clean Markdown.',
-      prompt: `Original request: ${finalState.userPrompt}\nApproved tasks: ${JSON.stringify(finalState.tasks)}${
-        finalState.validationFeedback
-          ? `\nNote: iteration limit reached; remaining validator feedback: ${finalState.validationFeedback}`
+      prompt: `Original request: ${finalState.businessGoal}\nApproved tasks: ${JSON.stringify(finalState.tasks)}${
+        !finalState.isValid && finalState.validationErrors?.length
+          ? `\nNote: iteration limit reached; remaining validator errors: ${finalState.validationErrors.join('; ')}`
           : ''
       }`,
       onStart: ({ modelId }) => {

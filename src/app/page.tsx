@@ -112,9 +112,11 @@ export default function AgentUiTest() {
                 </p>
                 <ul className="list-disc pl-5 space-y-1 text-sm text-slate-600">
                   {log.tasks.map((t: Task, taskIndex) => (
-                    <li key={`${t.title}-${taskIndex}`}>
-                      <strong>{t.title}</strong> — {t.description}{' '}
-                      <span className="text-slate-400">[{t.priority}]</span>
+                    <li key={`${t.id ?? t.title}-${taskIndex}`}>
+                      <strong>{t.title}</strong> — {t.assignee}{' '}
+                      <span className="text-slate-400">
+                        [{t.priority}] ({t.status})
+                      </span>
                     </li>
                   ))}
                 </ul>
@@ -137,6 +139,11 @@ export default function AgentUiTest() {
                     </span>
                   )}
                 </div>
+                {log.reasoning && (
+                  <p className="mt-2 text-xs text-slate-500 italic">
+                    Reasoning: {log.reasoning}
+                  </p>
+                )}
                 {!log.isValid &&
                   log.validationErrors &&
                   log.validationErrors.length > 0 && (
@@ -159,9 +166,11 @@ export default function AgentUiTest() {
                 </p>
                 <ul className="list-disc pl-5 space-y-1 text-sm text-slate-600">
                   {log.tasks.map((t: Task, taskIndex) => (
-                    <li key={`final-${t.title}-${taskIndex}`}>
-                      <strong>{t.title}</strong> — {t.description}{' '}
-                      <span className="text-slate-400">[{t.priority}]</span>
+                    <li key={`final-${t.id ?? t.title}-${taskIndex}`}>
+                      <strong>{t.title}</strong> — {t.assignee}{' '}
+                      <span className="text-slate-400">
+                        [{t.priority}] ({t.status})
+                      </span>
                     </li>
                   ))}
                 </ul>

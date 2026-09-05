@@ -1,15 +1,10 @@
-import { z } from 'zod';
+import type { ManagedTask } from './tools';
 
-export const MODEL_ID = 'xai/grok-4.6';
+export const MODEL_ID = 'deepseek-v4-flash';
 export const MAX_ITERATIONS = 3;
 
-export const taskSchema = z.object({
-  title: z.string().describe('Subtask title'),
-  description: z.string().describe('What specifically needs to be done'),
-  priority: z.enum(['low', 'medium', 'high']),
-});
-
-export type Task = z.infer<typeof taskSchema>;
+/** Graph/UI task shape — produced by createTask tool calls. */
+export type Task = ManagedTask;
 
 export type AgentStreamUpdate = {
   status?: 'running' | 'completed' | 'error';
@@ -19,4 +14,5 @@ export type AgentStreamUpdate = {
   validationErrors: string[] | null;
   loopCount: number | null;
   message?: string;
+  reasoning?: string | null;
 };
