@@ -1,24 +1,24 @@
 import {
-  convertToModelMessages,
   createUIMessageStreamResponse,
   streamText,
   toUIMessageStream,
   UIMessage,
 } from 'ai';
 
-// Позволяет серверу обрабатывать долгие ответы от ИИ (до 30 секунд)
-export const maxDuration = 30;
+import { createAgentGraph } from '@/lib/agent/graph';
+import { MAX_ITERATIONS, MODEL_ID } from '@/lib/agent/types';
 
-const MODEL_ID = 'xai/grok-4.6';
+// Multiple LLM calls in the graph (planner/validator × iterations + final stream)
+export const maxDuration = 120;
 
 function lastUserText(messages: UIMessage[]): string {
   const lastUser = [...messages].reverse().find(m => m.role === 'user');
-  if (!lastUser) return '(no user message)';
+  if (!lastUser) return '';
   return lastUser.parts
     .filter(part => part.type === 'text')
     .map(part => part.text)
     .join('')
-    .slice(0, 200);
+    .trim();
 }
 
 export async function POST(req: Request) {
@@ -26,33 +26,64 @@ export async function POST(req: Request) {
 
   try {
     const { messages }: { messages: UIMessage[] } = await req.json();
+    const userPrompt = lastUserText(messages);
 
-    // TEMP logging — remove when debugging is done
     console.log('[chat] incoming request', {
       messageCount: messages.length,
-      lastUserText: lastUserText(messages),
+      lastUserText: userPrompt.slice(0, 200),
       roles: messages.map(m => m.role),
     });
 
-    const modelMessages = await convertToModelMessages(messages);
+    if (!userPrompt) {
+      return new Response(JSON.stringify({ error: 'Empty user request' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
 
-    console.log('[chat] starting outgoing AI request', {
+    console.log('[agent] graph invoke start', {
       model: MODEL_ID,
-      modelMessageCount: modelMessages.length,
+      maxIterations: MAX_ITERATIONS,
+      elapsedMs: Date.now() - startedAt,
+    });
+
+    const app = createAgentGraph({ startedAt });
+    const finalState = await app.invoke({
+      userPrompt,
+      iterations: 0,
+      validationFeedback: '',
+      tasks: [],
+    });
+
+    console.log('[agent] graph invoke finish', {
+      iterations: finalState.iterations,
+      taskCount: finalState.tasks?.length ?? 0,
+      hadUnresolvedFeedback: Boolean(finalState.validationFeedback),
+      tasks: finalState.tasks,
+      elapsedMs: Date.now() - startedAt,
+    });
+
+    console.log('[chat] starting final presentation stream', {
       elapsedMs: Date.now() - startedAt,
     });
 
     const result = streamText({
       model: MODEL_ID,
-      messages: modelMessages,
+      system:
+        'You are an AI project manager. Present the final, team-approved task plan to the user in clean Markdown.',
+      prompt: `Original request: ${finalState.userPrompt}\nApproved tasks: ${JSON.stringify(finalState.tasks)}${
+        finalState.validationFeedback
+          ? `\nNote: iteration limit reached; remaining validator feedback: ${finalState.validationFeedback}`
+          : ''
+      }`,
       onStart: ({ modelId }) => {
-        console.log('[chat] AI request started (waiting for response…)', {
+        console.log('[chat] presentation AI started (waiting…)', {
           modelId,
           elapsedMs: Date.now() - startedAt,
         });
       },
       onFinish: ({ text, finishReason, usage }) => {
-        console.log('[chat] AI response finished', {
+        console.log('[chat] presentation AI finished', {
           finishReason,
           usage,
           textPreview: text.slice(0, 300),
@@ -60,18 +91,17 @@ export async function POST(req: Request) {
         });
       },
       onError: ({ error }) => {
-        console.error('[chat] AI stream error', {
+        console.error('[chat] presentation stream error', {
           error,
           elapsedMs: Date.now() - startedAt,
         });
       },
     });
 
-    console.log('[chat] returning stream response to client (still waiting on AI…)', {
+    console.log('[chat] returning stream response to client', {
       elapsedMs: Date.now() - startedAt,
     });
 
-    // AI SDK v7: toDataStreamResponse удалён — нужен UI message stream
     return createUIMessageStreamResponse({
       stream: toUIMessageStream({
         stream: result.stream,
@@ -88,12 +118,12 @@ export async function POST(req: Request) {
       }),
     });
   } catch (error: unknown) {
-    console.error('[chat] backend error', {
+    console.error('[agent] backend error', {
       error,
       elapsedMs: Date.now() - startedAt,
     });
     const message =
-      error instanceof Error ? error.message : 'Внутренняя ошибка сервера';
+      error instanceof Error ? error.message : 'Internal server error';
     return new Response(JSON.stringify({ error: message }), {
       status: 500,
       headers: { 'Content-Type': 'application/json' },
